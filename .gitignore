@@ -1,0 +1,11 @@
+# Ignore Some Hardware Sub-Folders
+Hardware/_Release_files_/BOM/
+Hardware/_Release_files_/Halloween_Ghost_v1_JLC_order/
+Hardware/_Release_files_/assembly_files.zip
+Hardware/_Release_files_/assembly_files.zip
+Hardware/_Release_files_/Halloween_Ghost_v1_JLC_order.zip
+Hardware/Audio/
+Hardware/BOM/
+Hardware/CAD/Halloween_Ghost_v1-backups/
+Hardware/CAD_backup_2022-10-05/
+Hardware/Pre-Layout.xlsx
