@@ -48,31 +48,36 @@
     #define LED_LEFT_EYE_POS 1      //Left Eye LED position in the LED array
     #define LED_PER_START_POS 2     //Starting array position for the peripheral LEDs
     #define LED_MAX_BRIGHTNESS 96  //Maximum allowed brightness for the LEDs
-    #define LED_FPS 240              //# of times to push an update to the LED color/brightness per second
+    #define LED_FPS 60              //# of times to push an update to the LED color/brightness per second
     CRGB LED_ARR[LED_QTY];          //global LED array
 
     /* LED Settings */
-    #define LED_EYE_BREATH_MIN 20
-    #define LED_EYE_BREATH_MAX 120
-    #define LED_EYE_BREATH_SPEED 3//1.5
+    #define LED_EYE_BREATH_MIN 0
+    #define LED_EYE_BREATH_MAX 150
+    #define LED_EYE_BREATH_RUN_SPEED 3
+    #define LED_EYE_BREATH_OTA_SPEED 8
+    #define LED_EYE_BREATH_SET_VAL 100      //This brightness will be held while the user is setting the hue (temporarily stops the blinking process)
     static float LED_EYE_BREATH_DELTA = (LED_EYE_BREATH_MAX - LED_EYE_BREATH_MIN) / 2.35040238;
     CHSV LED_EYE_COLOR;
     #define LED_DEFAULT_EYE_COLOR CRGB::Red
+    #define LED_OTA_EYE_COLOR CRGB::White
     uint8_t led_fill_peripheral = false;
     uint8_t led_peripheral_hue = 0;
+    uint8_t led_user_setting = false;
 
     /* Sleep / CPU configurations */
-    #define CPU_SLEEP_FREQ_MHZ 40   //Set CPU to 40MHz before going to sleep
-    #define CPU_RUN_FREQ_MHZ 80     //Set CPU to 80MHz while running
+    #define CPU_LPM_FREQ_MHZ 10     //Set CPU to 10MHz while in Low Power Mode (LPM) (background calculations, handlers, etc..)
+    #define CPU_FR_FREQ_MHZ 80      //Set CPU to 80MHz while in Full Run Mode (FR) (WiFi running, pushing updates to LEDs, etc..)
+    uint8_t cpu_old_freq_MHZ = 0;   //Holds the previous CPU frequency, for use in compensating the serial baud rate
 
 /* -------------- [END] HW Configuration Setup -------------- */
 
 /* ------------ [START] Debug compile options -------------- */
-    #define LOG_DEBUG true          //true = logging printed to terminal, false = no logging
+    #define LOG_DEBUG false          //true = logging printed to terminal, false = no logging
 /* -------------- [END] Debug compile options -------------- */
 
 /* ------------ [START] Serial Terminal Configuration -------------- */
-    #define SERIAL_BAUD 115200
+    #define SERIAL_BAUD 921600
 /* -------------- [END] Serial Terminal Configuration -------------- */
 
 /* ---------- [START] Button Configuration -------------- */
@@ -112,14 +117,17 @@
     void check_wakeup_reason();                 //Fucntion to check the wake-up reason for this boot cycle
 
     /* Power Management Prototypes */
-    void power_state_handler();                 //Handler function to execute various power state management tasks
-    void disableWiFi();                         //Function to disable WiFi for power savings
-    void disableBT();                           //Function to disable BT for power savings
-    void enter_deep_sleep_IO_wake();            //Function to enter Deep Sleep but wake-up on button press only
+    void power_state_handler();                                     //Handler function to execute various power state management tasks
+    void enter_LPM();                                               //Function to enter Low Power Mode (for background task handling)
+    void enter_FULL_RUN();                                          //Function to enter FULL RUN Mode (for foreground task handling)
+    void disableWiFi();                                             //Function to disable WiFi for power savings
+    void disableBT();                                               //Function to disable BT for power savings
+    void enter_deep_sleep_IO_wake();                                //Function to enter Deep Sleep but wake-up on button press only
+    void enter_light_sleep_TIMER_wake(uint64_t wake_timer);         //Function to enter Light Sleep but wake-up after wake_timer us
 
     /* LED Management Prototypes */
     void led_handler();                         //Handler function to execute various LED management tasks
-    void set_initial_eye();                     //Function to set the default Ghost eye color
+    void set_initial_eye_color();               //Function to set the default Ghost eye color
     void calculate_eye_fade();                  //Function to calculate the Ghost's eye brightness
 
     /* Input Button Management Prototypes */
@@ -146,10 +154,15 @@
     void EEPROM_save_eye_color(CHSV eye_color); //Function to write the current eye color (HSV converted to RGB) to be stored in EEPROM
 
     /* Debug / Printing Prototypes */
+    void compensate_serial_baud();              //Function to update serial baud rate if the CPU frequency changes
+    void print(String message);                 // Function to print a message */
+    void println(String message);               // Function to print a message, with CRLF
     void time_print(String message);            //Function to pre-pend a message with the current CPU running timestamp
     void time_println(String message);          //Function to pre-pend a message with the current CPU running timestamp, with CRLF
     void log(String message);                   //Function to log debug messages during development
     void logln(String message);                 //Function to log debug messages during development, with CRLF
+    void time_log(String message);              //Function to log debug messages during development, prepended with a timestamp
+    void time_logln(String message);            //Function to log debug messages during development, prepended with a timestamp, with CRLF
     
 /* -------------- [END] Define Function Prototypes -------------- */
 
@@ -160,9 +173,8 @@ void setup() {
     /* Initialize the EEPROM for later access */
     EEPROM.begin(EEPROM_SIZE);
 
-    /* Disable BT/WiFi for power savings */
-    disableWiFi();
-    disableBT();
+    /* Enter LPM ASAP for power savings */
+    enter_LPM();
 
     /* Initialize the HW pins / buttons */
     pin_config();
@@ -215,7 +227,7 @@ void pin_config() {
 void print_welcome_message() {
     time_println("***************************");
     time_println("***** Halloween Ghost *****");
-    time_print("*****     SW: "); Serial.print(SW_Version); Serial.println("    *****");
+    time_print("*****     SW: "); print(SW_Version); println("    *****");
     time_println("***************************");
 }
 
@@ -226,24 +238,65 @@ void check_wakeup_reason() {
    wake_up_source = esp_sleep_get_wakeup_cause();
 
    switch(wake_up_source){
-      case ESP_SLEEP_WAKEUP_EXT0 : Serial.println("Wake-up from external signal with RTC_IO"); break;
-      case ESP_SLEEP_WAKEUP_EXT1 : Serial.println("Wake-up from external signal with RTC_CNTL"); break;
-      case ESP_SLEEP_WAKEUP_TIMER : Serial.println("Wake up caused by a timer"); break;
-      case ESP_SLEEP_WAKEUP_TOUCHPAD : Serial.println("Wake up caused by a touchpad"); break;
+      case ESP_SLEEP_WAKEUP_EXT0 : time_println("Wake-up from external signal with RTC_IO"); break;
+      case ESP_SLEEP_WAKEUP_EXT1 : time_println("Wake-up from external signal with RTC_CNTL"); break;
+      case ESP_SLEEP_WAKEUP_TIMER : time_println("Wake up caused by a timer"); break;
+      case ESP_SLEEP_WAKEUP_TOUCHPAD : time_println("Wake up caused by a touchpad"); break;
       default : Serial.printf("Wake up not caused by Deep Sleep: %d\n",wake_up_source); break;
    }
 }
 
+/* Handler function to execute various power state management tasks */
+void power_state_handler() {    
+    if (millis() > POWER_RUNTIME) {
+        time_println("Runtime exceeded (" + String (POWER_RUNTIME/1000.0/60.0, DEC) + " min)");
+        time_println("Enterring Deep Sleep for reduced power");
+        enter_deep_sleep_IO_wake();
+     }
+
+    /* if the brightness value is within 10% of the next integer, sleep for a bit to save power - no dithering will occur */
+    if (abs((float)LED_EYE_COLOR.v - round(LED_EYE_COLOR.v)) < 0.1) {
+        enter_light_sleep_TIMER_wake(1000000/LED_FPS);
+    }
+}
+
+/* Function to enter Low Power Mode (for background task handling) */
+void enter_LPM() {
+    if (!check_for_ota_update) {
+        time_logln("[Power State]: Entering LPM..");
+
+        /* Disable BT / WiFi */
+        time_logln("..Disabling WiFi");
+        disableWiFi();
+        time_logln("..Disabling BT");
+        disableBT();
+
+        /* Set the CPU clock to the slow speed to save power */
+        time_logln("..Setting CPU Speed: " + String(CPU_LPM_FREQ_MHZ, DEC) + " MHz");
+        setCpuFrequencyMhz(CPU_LPM_FREQ_MHZ);
+        //compensate_serial_baud();
+    }
+
+}
+
+/* Function to enter FULL RUN Mode (for foreground task handling) */
+void enter_FULL_RUN() {
+    time_logln("[Power State]: Entering Full Run..");
+
+    /* Set the CPU clock to the high speed for time critical applications */
+    time_logln("..Setting CPU Speed: " + String(CPU_FR_FREQ_MHZ, DEC) + " MHz");
+    setCpuFrequencyMhz(CPU_FR_FREQ_MHZ);
+    //compensate_serial_baud();
+}
+
 /* Function to disable WiFi for power savings */
 void disableWiFi() {
-    logln("Disabling WiFi for power saving");
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
 }
 
 /* Function to disable BT for power savings */
 void disableBT() {
-    logln("Disabling BT for power saving");
     btStop();
 }
 
@@ -255,11 +308,22 @@ void enter_deep_sleep_IO_wake() {
     /* Disable the wake-up timer for now */
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
 
-    /* Store the current eye color in EEPROM */
-    EEPROM_save_eye_color(LED_EYE_COLOR);
+    /* Store the current eye color in EEPROM, unless it's white */
+    if(LED_EYE_COLOR.s > 0) {EEPROM_save_eye_color(LED_EYE_COLOR);}
 
     /* Go to sleep */
     esp_deep_sleep_start();
+}
+
+/* Function to enter Light Sleep but wake-up after wake_timer us */
+void enter_light_sleep_TIMER_wake(uint64_t wake_timer) {
+    if (!check_for_ota_update) {
+        /* Set a wake-up timer */
+        esp_sleep_enable_timer_wakeup(wake_timer);
+
+        /* Go to sleep */
+        esp_light_sleep_start();
+    }
 }
 
 /* Handler function to execute various LED management tasks */
@@ -270,7 +334,7 @@ void led_handler() {
     /* Fill the surrounding lights periodically */
     EVERY_N_SECONDS(10) { led_fill_peripheral = !led_fill_peripheral;}
 
-    if (led_fill_peripheral) {
+    if (led_fill_peripheral && !check_for_ota_update) {
         EVERY_N_MILLISECONDS(20) {led_peripheral_hue++;}
         fill_rainbow(LED_ARR + LED_PER_START_POS, LED_QTY - LED_PER_START_POS, led_peripheral_hue,  7);
     } else {
@@ -278,8 +342,34 @@ void led_handler() {
     }
 
     /* push LED data */
+    enter_FULL_RUN();
     FastLED.show();
+    enter_LPM();
 
+}
+
+/* Function to set the default Ghost eye color */
+void set_initial_eye_color() {
+    LED_EYE_COLOR = rgb2hsv_approximate(EEPROM_check_last_eye_color());
+
+    /* If a white LED somehow got saved, just load thee default eye color */
+    LED_EYE_COLOR = LED_EYE_COLOR.s ? LED_EYE_COLOR : rgb2hsv_approximate(LED_DEFAULT_EYE_COLOR);
+}
+
+/* Function to calculate the Ghost's eye brightness */
+void calculate_eye_fade() {
+    /* Calculate the brightness value, based on exponential effect over time */
+    float deltaVAL = ((exp(sin((check_for_ota_update ? LED_EYE_BREATH_OTA_SPEED : LED_EYE_BREATH_RUN_SPEED) * millis()/2000.0*PI)) -0.36787944) * LED_EYE_BREATH_DELTA);
+
+    /* Adjust the HSV value to perform dimming */
+    if (led_user_setting) {LED_EYE_COLOR.v = LED_EYE_BREATH_SET_VAL;} 
+    else {LED_EYE_COLOR.v = deltaVAL + LED_EYE_BREATH_MIN;}
+
+    //LED_EYE_COLOR.v = beatsin16(30, LED_EYE_BREATH_MIN, LED_EYE_BREATH_MAX);
+
+    /* Update the values in the LED array */
+    LED_ARR[LED_RIGHT_EYE_POS] = CHSV(LED_EYE_COLOR.h, LED_EYE_COLOR.s, LED_EYE_COLOR.v);
+    LED_ARR[LED_LEFT_EYE_POS] = CHSV(LED_EYE_COLOR.h, LED_EYE_COLOR.s, LED_EYE_COLOR.v);
 }
 
 /* Handler function to execute various input button management tasks */
@@ -288,7 +378,13 @@ void button_handler() {
     right_hand_btn.loop();
 
     /* Temporary work around */
-    if (left_hand_btn.isPressed()) {button_left_pressed(left_hand_btn);}
+    if (left_hand_btn.isPressed()) {
+        button_left_pressed(left_hand_btn);
+        led_user_setting = true;
+    } else {
+        /* Button released */
+        led_user_setting = false;
+    }
 }
 
 /* Function to initialize the button configurations */
@@ -301,19 +397,22 @@ void button_init() {
 
     /* Configure Right Hand */
     right_hand_btn.begin(RIGHT_TOUCH_PIN, INPUT, false, false);       //(pin, mode, isCapacitive, activeLow)
-    right_hand_btn.setDebounceTime(500);
+    right_hand_btn.setDebounceTime(1000);
     right_hand_btn.setClickHandler(button_right_click);
     right_hand_btn.setLongClickTime(5000);
     right_hand_btn.setLongClickHandler(button_right_long_click);
+    right_hand_btn.setLongClickDetectedHandler(button_right_long_click);
 }
 
 /* Callback function to be executed when left is clicked */
 void button_left_pressed(Button2& btn) {
-    EVERY_N_MILLISECONDS (50) {
-        logln("Left Hand - Pressed: Incrementing Eye Hue -> " + String(LED_EYE_COLOR.h));
+    if (!check_for_ota_update) {
+        EVERY_N_MILLISECONDS (1) {
+            logln("Left Hand - Pressed: Incrementing Eye Hue -> " + String(LED_EYE_COLOR.h));
 
-        /* Increment the hue */
-        LED_EYE_COLOR.h++;
+            /* Increment the hue */
+            LED_EYE_COLOR.h++;
+        }
     }
 }
 
@@ -336,41 +435,6 @@ void button_right_long_click(Button2& btn) {
     logln("Right Hand - Long Click: Starting OTA Scan..");
 
     check_for_ota_update = true;
-}
-
-/* Handler function to execute various power state management tasks */
-void power_state_handler() {    
-    /* Set a wake-up timer based on the desired frames-per-second */
-    //esp_sleep_enable_timer_wakeup(1000000/LED_FPS);
-
-    /* Go to sleep */
-    //esp_light_sleep_start();
-
-    if (millis() > POWER_RUNTIME) {
-        Serial.println("Runtime exceeded (" + String (POWER_RUNTIME/1000.0/60.0, DEC) + " min)");
-        Serial.println("Enterring Deep Sleep for reduced power");
-        enter_deep_sleep_IO_wake();
-     }
-}
-
-/* Function to set the default Ghost eye color */
-void set_initial_eye_color() {
-    LED_EYE_COLOR = rgb2hsv_approximate(EEPROM_check_last_eye_color());
-}
-
-/* Function to calculate the Ghost's eye brightness */
-void calculate_eye_fade() {
-    /* Calculate the brightness value, based on exponential effect over time */
-    float deltaVAL = ((exp(sin(LED_EYE_BREATH_SPEED * millis()/2000.0*PI)) -0.36787944) * LED_EYE_BREATH_DELTA);
-
-    /* Adjust the HSV value to perform dimming */
-    LED_EYE_COLOR.v = deltaVAL + LED_EYE_BREATH_MIN;
-
-    //LED_EYE_COLOR.v = beatsin16(30, LED_EYE_BREATH_MIN, LED_EYE_BREATH_MAX);
-
-    /* Update the values in the LED array */
-    LED_ARR[LED_RIGHT_EYE_POS] = CHSV(LED_EYE_COLOR.h, LED_EYE_COLOR.s, LED_EYE_COLOR.v);
-    LED_ARR[LED_LEFT_EYE_POS] = CHSV(LED_EYE_COLOR.h, LED_EYE_COLOR.s, LED_EYE_COLOR.v);
 }
 
 /* Handler function to execute various OTA management tasks */
@@ -453,15 +517,25 @@ void ota_enable_ap() {
     /* Start the ota timer */
     ota_start_time = millis();
 
+    /* Set power state to Full Run */
+    enter_FULL_RUN();
+
     time_println("Enabling WiFi AP to check for OTA updates..");
-    time_print("..Connect to SSID: "); Serial.println(ota_ap_ssid);
-    time_print("..       Password: "); Serial.println(ota_ap_password);
+    time_print("..Connect to SSID: "); println(ota_ap_ssid);
+    time_print("..       Password: "); println(ota_ap_password);
     time_print("OTA mode will be held for " + String(OTA_HANDLER_TIMEOUT/1000, DEC) + " seconds before going back to sleep.");
 
     /* Enable Wifi radio and start the access point */
     WiFi.disconnect(false);
     WiFi.mode(WIFI_AP);
     WiFi.softAP(ota_ap_ssid, ota_ap_password);
+
+    /* Enable automatic modem sleep */
+    WiFi.setSleep(true);
+
+    /* Show the user that OTA is active, but store the current color to be returned to after a reboot */
+    EEPROM_save_eye_color(LED_EYE_COLOR);
+    LED_EYE_COLOR = rgb2hsv_approximate(LED_OTA_EYE_COLOR);
 
     /* Increment to the next function index after 1000ms */
     ota_handler_next_function(1000);
@@ -476,7 +550,7 @@ void ota_start_server() {
 
     /* Confirm and print the IP Address to the terminal */
     IPAddress myIP = WiFi.softAPIP();
-    time_print(".. AP IP Address: "); Serial.println(myIP);
+    time_print(".. AP IP Address: "); println(String(myIP));
 
     /* Configure the server */
     server.on("/myurl", HTTP_GET, []() {
@@ -536,6 +610,34 @@ void EEPROM_save_eye_color(CHSV eye_color) {
     EEPROM_save_eye_color(rgb_eye_color);
 }
 
+/* Function to update serial baud rate if the CPU frequency changes */
+void compensate_serial_baud() {
+    uint8_t cpu_freq = getCpuFrequencyMhz();
+
+    if (cpu_freq != cpu_old_freq_MHZ) {
+        /* store the current cpu frequency */
+        cpu_old_freq_MHZ = cpu_freq;
+
+        /* if current cpu frequency < 80MHz, need to compensate the baud rate */
+        if (cpu_freq < 80) {
+            uint8_t compensated_baud = (80 / cpu_freq) * SERIAL_BAUD;
+            Serial.end();
+            delay(1000);
+            Serial.begin(compensated_baud);
+        }
+    }
+}
+
+/* Function to print a message */
+void print(String message) {
+    Serial.print(message);
+}
+
+/* Function to print a message, with CRLF */
+void println(String message) {
+    print(message + "\r\n");
+}
+
 /* Function to pre-pend a message with the current CPU running timestamp */
 void time_print(String message) {
     String timed_message = "[" + String((millis()), DEC) + "] " + message;
@@ -549,10 +651,20 @@ void time_println(String message) {
 
 /* Function to log debug messages during development */
 void log(String message) {
-    if(LOG_DEBUG) {time_print(message);}
+    if(LOG_DEBUG) {print(message);}
 }
 
 /* Function to log debug messages during development, with CRLF */
 void logln(String message) {
     log(message + "\r\n");
+}
+
+/* Function to log debug messages during development, prepended with a timestamp */
+void time_log(String message) {
+    if(LOG_DEBUG) {time_print(message);}
+}
+
+/* Function to log debug messages during development, prepended with a timestamp, with CRLF */
+void time_logln(String message) {
+    time_log(message + "\r\n");
 }
