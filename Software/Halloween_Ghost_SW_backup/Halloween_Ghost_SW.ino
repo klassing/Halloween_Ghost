@@ -1,7 +1,7 @@
 /* 
     Author: Ryan Klassing 
     Date: 10/18/22
-    Version: */ #define SW_Version "v0.0.1" /*
+    Version: */ #define SW_Version "v0.0.2" /*
     Description:
         This is intended to run a small ESP32 based PCB that looks
         like a ghost, for simple/fun Halloween decotrations.  The
@@ -19,6 +19,7 @@
     #include <FastLED.h>        // Tested with v3.5.0 - https://github.com/FastLED/FastLED/releases/tag/3.5.0
     #include <cmdArduino.h>     // Custom Forked library from Ryan K - https://github.com/klassing/cmdArduino
     #include <cmdChar.h>        // Custom library from Ryan K - https://github.com/klassing/arduino_libraries
+    #include <rateLimitter.h>   // Custom library from Ryan K - https://github.com/klassing/arduino_libraries
     #include <WiFi.h>           // Included in ESP32 Arduino Core - Tested with v2.0.5 - https://github.com/espressif/arduino-esp32/releases/tag/2.0.5
     #include <esp_bt.h>         // Included in ESP32 Arduino Core - Tested with v2.0.5 - https://github.com/espressif/arduino-esp32/releases/tag/2.0.5
     #include <WiFiAP.h>         // Included in ESP32 Arduino Core - Tested with v2.0.5 - https://github.com/espressif/arduino-esp32/releases/tag/2.0.5
@@ -47,8 +48,9 @@
     #define LED_RIGHT_EYE_POS 0     //Right Eye LED position in the LED array
     #define LED_LEFT_EYE_POS 1      //Left Eye LED position in the LED array
     #define LED_PER_START_POS 2     //Starting array position for the peripheral LEDs
-    #define LED_MAX_BRIGHTNESS 96  //Maximum allowed brightness for the LEDs
+    #define LED_MAX_BRIGHTNESS 96   //Maximum allowed brightness for the LEDs
     #define LED_FPS 60              //# of times to push an update to the LED color/brightness per second
+    #define LED_PER_FADE_AMT 20     //Fade-in / Fade-out will be done in this increment
     CRGB LED_ARR[LED_QTY];          //global LED array
 
     /* LED Settings */
@@ -109,6 +111,10 @@
 /* ---- [START] Power Configuration -------------- */
     #define POWER_RUNTIME 300000                //Time to run after waking up (in ms) before going back to Deep Sleep
 /* ------ [END] Power Configuration -------------- */
+
+/* -------- [START] rateLimitter Configuration -------------- */
+    rateLimitter limit_peripheral_fade;         //Limitter object to keep track of how long fading peripheral lights will take
+/* ---------- [END] rateLimitter Configuration -------------- */
 
 /* ------------ [START] Define Function Prototypes -------------- */
     /* General Protoypes */
@@ -254,8 +260,8 @@ void power_state_handler() {
         enter_deep_sleep_IO_wake();
      }
 
-    /* if the brightness value is within 10% of the next integer, sleep for a bit to save power - no dithering will occur */
-    if (abs((float)LED_EYE_COLOR.v - round(LED_EYE_COLOR.v)) < 0.1) {
+    /* if the brightness value is within 10% of the nearest integer, sleep for a bit to save power - no dithering will occur */
+    if ((abs((float)LED_EYE_COLOR.v - round(LED_EYE_COLOR.v)) < 0.1)) {
         enter_light_sleep_TIMER_wake(1000000/LED_FPS);
     }
 }
@@ -338,7 +344,7 @@ void led_handler() {
         EVERY_N_MILLISECONDS(20) {led_peripheral_hue++;}
         fill_rainbow(LED_ARR + LED_PER_START_POS, LED_QTY - LED_PER_START_POS, led_peripheral_hue,  7);
     } else {
-        fadeToBlackBy(LED_ARR + LED_PER_START_POS, LED_QTY - LED_PER_START_POS, 1);
+        fadeToBlackBy(LED_ARR + LED_PER_START_POS, LED_QTY - LED_PER_START_POS, LED_PER_FADE_AMT);
     }
 
     /* push LED data */
